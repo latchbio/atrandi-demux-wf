@@ -1,0 +1,9 @@
+docker.sh
+Dockerfile.smk
+inspector.yaml
+Snakefile
+
+**/__pycache__
+.venv
+.snakemake
+.latch/.logs

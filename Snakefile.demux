@@ -1,0 +1,223 @@
+import glob
+import sys
+import os
+from dataclasses import dataclass
+from pathlib import Path
+import re
+
+sys.path.insert(0, Path(workflow.basedir).parent.as_posix()) # does this not work with latchbio?
+configfile: "config.yaml" #config folder is not working correctly?
+
+results_dir = config["results_dir"]
+
+@dataclass
+class Sample:
+    name: str
+    r1: str
+    r2: str
+
+
+# any specifics where data goes - i.e. does it matter if data is in directory 'fastq' ?
+def get_samples():
+    samples = {s["name"]: Sample(**s) for s in config["samples"]}
+
+    return samples.keys(), samples
+
+
+sample_names, samples = get_samples()
+
+
+rule all:
+    input:
+        storage.latch(expand(os.path.join(results_dir,"auxiliary/output/rule_plot_split_hist/{sample}_observed_bc_hist.png"), sample=sample_names)),
+        storage.latch(expand(os.path.join(results_dir,"{sample}_split_barcode_table.txt"), sample=sample_names)),
+        sample_pheniqs_config = storage.latch(expand(os.path.join(results_dir,"auxiliary/output/rule_make_sample_config/{sample}_sample_config.json"), sample=sample_names)),
+        sample_report = storage.latch(expand(os.path.join(results_dir,"auxiliary/output/rule_make_demultiplex_sample/{sample}_sample_report.txt"), sample=sample_names)),
+        observed_bc_list = storage.latch(expand(os.path.join(results_dir,"auxiliary/output/rule_count_sort_sample/{sample}_observed_bc_list.txt"), sample=sample_names)),
+        filtered_bc_list = storage.latch(expand(os.path.join(results_dir,"auxiliary/output/rule_filter_bc_list/{sample}_filtered_bc_list.txt"), sample=sample_names)),
+        split_pheniqs_config = storage.latch(expand(os.path.join(results_dir,"auxiliary/output/rule_make_split_config/{sample}_split_config.json"), sample=sample_names)),
+        split_report = storage.latch(expand(os.path.join(results_dir,"auxiliary/output/rule_split_full/{sample}_split_report.txt"), sample=sample_names)),
+        sampled_fastq = storage.latch(expand(os.path.join(results_dir,"auxiliary/output/rule_get_fraction/{sample}.fastq"), sample=sample_names))
+
+    default_target: True
+
+rule get_fraction:
+    input:
+        r2 = lambda wildcards: storage.latch(samples[wildcards.sample].r2)
+    output:
+        sampled_fastq = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_get_fraction/{sample}.fastq")) # not a gzipped file
+    params:
+        random_seed = config['random_seed'],
+        fraction_to_sample = config['fraction_to_sample']
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/seqtk:0.1.6"
+    log:
+        storage.latch(os.path.join(results_dir,"auxiliary/logs/rule_get_fraction/{sample}.log"))
+    resources:
+        cpus=2,
+        mem_mib=4096
+    shell:
+        "seqtk sample -s{params.random_seed} {input.r2} {params.fraction_to_sample} > {output.sampled_fastq} 2> {log}"
+
+rule make_sample_config:
+    input:
+        bcD = storage.latch(config['bc_D']),
+        bcC = storage.latch(config['bc_C']),
+        bcB = storage.latch(config['bc_B']),
+        bcA = storage.latch(config['bc_A']),
+        sampled_fastq = rules.get_fraction.output.sampled_fastq
+    output:
+        sample_pheniqs_config = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_make_sample_config/{sample}_sample_config.json"))
+    params:
+        # output directory is determined during config creation
+        demux_sampled_bam = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_demultiplex_sample/{sample}_demux.bam")),
+        dist_tolerance = config['sample_dist_tolerance'],
+        token_D = config['sample_token_D'],
+        token_C = config['sample_token_C'],
+        token_B = config['sample_token_B'],
+        token_A = config['sample_token_A']
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/pandas:2.2.5"
+    log:
+        os.path.join(results_dir,"auxiliary/logs/rule_make_sample_config/{sample}.log")
+    resources:
+        cpus=2,
+        mem_mib=4096
+    script:
+        "workflow/scripts/make_sample_config.py"
+
+rule demultiplex_sample:
+    input:
+        sampled_fastq = rules.get_fraction.output.sampled_fastq,
+        sample_pheniqs_config = rules.make_sample_config.output.sample_pheniqs_config
+    output:
+        demux_sampled_bam = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_demultiplex_sample/{sample}_demux.bam")),
+        sample_report = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_make_demultiplex_sample/{sample}_sample_report.txt"))
+    threads: config['threads']
+    log:
+        os.path.join(results_dir,"auxiliary/logs/rule_demultiplex_sample/{sample}.log")
+    resources:
+        cpus=16,
+        mem_mib=32768,
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/pheniqs:0.1.3"
+    shell:
+        "pheniqs mux --config {input.sample_pheniqs_config} -R {output.sample_report} -t {threads}"
+
+rule count_sort_sample:
+    input:
+        demux_sampled_bam = rules.demultiplex_sample.output.demux_sampled_bam
+    output:
+        observed_bc_list = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_count_sort_sample/{sample}_observed_bc_list.txt"))
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/minimap:0.1.5"
+    log:
+        storage.latch(os.path.join(results_dir,"auxiliary/logs/rule_count_sort_sample/{sample}.log"))
+    resources:
+        cpus=16,
+        mem_mib=32768,
+    shell:
+        """
+        samtools view -h {input.demux_sampled_bam} |
+        awk -F '\t' '{{ for (i=1; i<=NF; i++) {{ if ($i ~ /^CB:Z:/) {{ split($i, tag, ":"); print tag[3]; }} }} }}' |
+        sort |
+        uniq -c > {output.observed_bc_list} 2> {log}
+        """
+
+rule plot_split_hist:
+    input:
+        observed_bc_list = rules.count_sort_sample.output.observed_bc_list
+    output:
+        observed_barcode_hist = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_plot_split_hist/{sample}_observed_bc_hist.png")),
+        observed_read_hist = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_plot_split_hist/{sample}_observed_read_hist.png"))
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/plot-observed:0.1.2"
+    log:
+        storage.latch(os.path.join(results_dir,"auxiliary/logs/rule_plot_split_hist/{sample}.log"))
+    resources:
+        cpus=1,
+        mem_mib=2048
+    script:
+        "workflow/scripts/plot_observed.py"
+
+rule filter_bc_list:
+    input:
+        observed_bc_list = rules.count_sort_sample.output.observed_bc_list
+    output:
+        filtered_bc_list = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_filter_bc_list/{sample}_filtered_bc_list.txt"))
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/pandas:2.2.5"
+    log:
+        storage.latch(os.path.join(results_dir,"auxiliary/logs/rule_filter_bc_list/{sample}.log"))
+    resources:
+        cpus=1,
+        mem_mib=2048
+    script:
+        "workflow/scripts/filter_barcodes.py"
+
+rule make_split_config:
+    input:
+        filtered_bc_list  = rules.filter_bc_list.output.filtered_bc_list,
+        r1 = lambda wildcards: storage.latch(samples[wildcards.sample].r1),
+        r2 = lambda wildcards: storage.latch(samples[wildcards.sample].r2),
+    output:
+        split_pheniqs_config = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_make_split_config/{sample}_split_config.json"))
+    params:
+        # split fastq goes to separate dir at the top
+        outdir = storage.latch(os.path.join(results_dir,"split_fastq/{sample}_split_fastq")),
+        outdir_bc = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_split_full/{sample}_barcodes")),
+        undetermined_r1 = storage.latch(os.path.join(results_dir,"split_fastq/{sample}_split_fastq/undetermined_r1.fastq.gz")),
+        undetermined_r2 = storage.latch(os.path.join(results_dir,"split_fastq/{sample}_split_fastq/undetermined_r2.fastq.gz")),
+        undetermined_bc = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_split_full/{sample}_barcodes/undetermined_bc.fastq.gz")),
+        dist_tolerance = config['split_dist_tolerance'],
+        split_position_token = config['split_position_token'],
+        knit_token = config['split_knit_token']
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/pandas:2.2.5"
+    log:
+        storage.latch(os.path.join(results_dir,"auxiliary/logs/rule_make_split_config/{sample}.log"))
+    resources:
+        cpus=1,
+        mem_mib=2048
+    script:
+        "workflow/scripts/make_split_config.py"
+
+rule split_full:
+    input:
+        r1 = lambda wildcards: storage.latch(samples[wildcards.sample].r1),
+        r2 = lambda wildcards: storage.latch(samples[wildcards.sample].r2),
+        split_pheniqs_config = rules.make_split_config.output.split_pheniqs_config
+    output:
+        split_report = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_split_full/{sample}_split_report.txt")),
+        barcode_dir = storage.latch(os.path.join(results_dir,"auxiliary/output/rule_split_full/{sample}_barcodes")),
+        split_fastqs_dir = storage.latch(os.path.join(results_dir,"split_fastq/{sample}_split_fastq"))
+    threads: config['threads']
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/pheniqs:0.1.3"
+    log:
+        storage.latch(os.path.join(results_dir,"auxiliary/logs/rule_split_full/{sample}.log"))
+    resources:
+        cpus=16,
+        mem_mib=32768
+    shell:
+        """
+        mkdir -p {output.barcode_dir}
+        mkdir -p {output.split_fastqs_dir}
+        pheniqs mux --config {input.split_pheniqs_config} -R {output.split_report} -t {threads}
+        """
+
+rule parse_pheniqs_report:
+    input:
+        split_report = rules.split_full.output.split_report
+    output:
+        # split fastq summary tables goes to separate dir at the top
+        split_barcode_table = storage.latch(os.path.join(results_dir,"{sample}_split_barcode_table.txt"))
+    container:
+        "docker://812206152185.dkr.ecr.us-west-2.amazonaws.com/snakemake/pandas:2.2.5"
+    log:
+        storage.latch(os.path.join(results_dir,"auxiliary/logs/rule_parse_pheniqs_report/{sample}.log"))
+    resources:
+        cpus=1,
+        mem_mib=2048
+    script:
+        "workflow/scripts/parse_pheniqs_report.py"

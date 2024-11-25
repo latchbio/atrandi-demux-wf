@@ -1,0 +1,8 @@
+data_dir: "results"
+results_dir: "latch://38.account/atrandi-results"
+fasta: "latch://38.account/mixed_genome/mixed.fasta"
+gtf: "latch://38.account/mixed_genome/mixed.gtf"
+index_file: "latch://38.account/mixed_genome/minimap2_mixed_index.mmi"
+random_seed: 42
+filter_chromosomes: false  #list of values or false. E.g. ["NZ_LR881938.1", "NC_000964.3"]
+threads: 72
