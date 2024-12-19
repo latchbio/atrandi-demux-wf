@@ -7,3 +7,7 @@ Snakefile
 .venv
 .snakemake
 .latch/.logs
+dockerfiles/
+build_images.py
+latch_config.json
+patch_singularity.py

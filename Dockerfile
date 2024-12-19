@@ -9,11 +9,11 @@ run curl -L -O \
 run /root/mambaforge/bin/mamba create -n snakemake python=3.11
 env PATH /root/mambaforge/envs/snakemake/bin:$PATH
 
-run pip install snakemake snakemake_executor_plugin_latch==0.1.2 snakemake_storage_plugin_latch==0.1.3
+run pip install snakemake snakemake_executor_plugin_latch==0.1.2 snakemake_storage_plugin_latch==0.1.9
 
 # Latch SDK
 # DO NOT REMOVE
-run pip install latch==2.54.0.a8
+run pip install latch==2.54.0.a9
 run mkdir /opt/latch
 
 copy wf /root/wf

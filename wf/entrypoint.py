@@ -4,8 +4,10 @@ import shutil
 import subprocess
 import sys
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
+from enum import Enum
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from latch.resources.tasks import custom_task, snakemake_runtime_task
@@ -13,11 +15,36 @@ from latch.resources.workflow import workflow
 from latch.types.directory import LatchDir, LatchOutputDir
 from latch.types.file import LatchFile
 from latch_cli.services.register.utils import import_module_by_path
-from latch_cli.snakemake.v2.utils import get_config_val
 
 import_module_by_path(Path("latch_metadata/__init__.py"))
 
 import latch.types.metadata.snakemake_v2 as smv2
+
+
+def get_config_val(val):
+    if isinstance(val, list):
+        return [get_config_val(x) for x in val]
+    if isinstance(val, dict):
+        return {k: get_config_val(v) for k, v in val.items()}
+    if isinstance(val, (LatchFile, LatchDir)):
+        if val.remote_path is None:
+            return str(val.path)
+
+        parsed = urlparse(val.remote_path)
+        domain = parsed.netloc
+        if domain == "":
+            domain = "inferred"
+
+        return f"/ldata/{domain}{parsed.path}"
+
+    if isinstance(val, (int, float, bool, type(None))):
+        return val
+    if is_dataclass(val):
+        return {f.name: get_config_val(getattr(val, f.name)) for f in fields(val)}
+    if isinstance(val, Enum):
+        return val.value
+
+    return str(val)
 
 
 @dataclass
@@ -40,7 +67,7 @@ def initialize() -> str:
         "http://nf-dispatcher-service.flyte.svc.cluster.local/provision-storage-ofs",
         headers=headers,
         json={
-            "storage_expiration_hours": 0,
+            "storage_expiration_hours": 24 * 30,
             "version": 2,
             "snakemake": True,
         },
