@@ -163,10 +163,11 @@ def snakemake_runtime(
         str(config_path),
         "--executor",
         "latch",
+        "--default-storage-provider",
+        "latch",
         "--jobs",
         "1000",
-        "--quiet",
-        "--verbose",
+        "--use-conda",
     ]
 
     print("Launching Snakemake Runtime")
